@@ -16,13 +16,14 @@ def get_config() -> dict:
 
         config["MONDAY_API_TOKEN"] = st.secrets.get("MONDAY_API_TOKEN", "")
         config["GEMINI_API_KEY"] = st.secrets.get("GEMINI_API_KEY", "")
+        config["GROQ_API_KEY"] = st.secrets.get("GROQ_API_KEY", "")
         config["WORK_ORDERS_BOARD_ID"] = str(st.secrets.get("WORK_ORDERS_BOARD_ID", ""))
         config["DEALS_BOARD_ID"] = str(st.secrets.get("DEALS_BOARD_ID", ""))
     except Exception:
         pass
 
     # Fall back to environment variables (used for local dev / standalone scripts)
-    for key in ["MONDAY_API_TOKEN", "GEMINI_API_KEY", "WORK_ORDERS_BOARD_ID", "DEALS_BOARD_ID"]:
+    for key in ["MONDAY_API_TOKEN", "GEMINI_API_KEY", "GROQ_API_KEY", "WORK_ORDERS_BOARD_ID", "DEALS_BOARD_ID"]:
         if key not in config or not config[key]:
             config[key] = os.environ.get(key, "")
 
@@ -31,7 +32,7 @@ def get_config() -> dict:
         from dotenv import load_dotenv
 
         load_dotenv()
-        for key in ["MONDAY_API_TOKEN", "GEMINI_API_KEY", "WORK_ORDERS_BOARD_ID", "DEALS_BOARD_ID"]:
+        for key in ["MONDAY_API_TOKEN", "GEMINI_API_KEY", "GROQ_API_KEY", "WORK_ORDERS_BOARD_ID", "DEALS_BOARD_ID"]:
             if not config.get(key):
                 config[key] = os.environ.get(key, "")
     except ImportError:

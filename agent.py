@@ -1,13 +1,11 @@
 """
-Claude agent with tool calling (Step 4 of the build).
+BI Agent Module (Step 4 of the build).
 
-Implements the standard tool-use loop:
-1. Send user message + tool definitions to Claude
-2. If Claude requests a tool call, execute the corresponding Python function
-3. Send tool result back to Claude
-4. Get final synthesized answer
+Supports BOTH Gemini (Google GenAI) and Groq (Llama 3) dynamically.
+If GROQ_API_KEY is configured, it runs via Groq (extremely fast & free with no 503s).
+Otherwise, it falls back to Gemini.
 
-The agent always surfaces data quality caveats — never suppresses them.
+Includes automatic exponential backoff retries to handle API congestion.
 """
 
 import json
@@ -18,11 +16,7 @@ from google.genai.errors import APIError
 from config import get_config
 from tools import get_deals, get_work_orders, get_cross_board_summary, generate_leadership_summary
 
-
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
-
+# System prompt is shared across both providers
 SYSTEM_PROMPT = """You are a business intelligence analyst for a drone services company (similar to Skylark Drones). You help founders and executives get quick, accurate answers to business questions by querying live data from two Monday.com boards:
 
 1. **Deals Board** — Sales pipeline data including deal names, stages, sectors, values, closure probabilities, and statuses (Open/Won/Dead).
@@ -48,21 +42,77 @@ SYSTEM_PROMPT = """You are a business intelligence analyst for a drone services 
 Mining, Renewables, Powerline, Railways, Construction, DSP, Others, Security and Surveillance, Manufacturing, Tender, Aviation
 """
 
-
-# ---------------------------------------------------------------------------
-# Tool definitions (JSON Schema for Gemini tool use)
-# ---------------------------------------------------------------------------
-
-TOOLS = [
+# Gemini Python Function Tools
+GEMINI_TOOLS = [
     get_deals,
     get_work_orders,
     get_cross_board_summary,
     generate_leadership_summary,
 ]
 
+# Groq / OpenAI JSON Schema Tools
+GROQ_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_deals",
+            "description": "Fetch and filter deals from the Deals board to answer questions about the sales pipeline.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector": {"type": "string", "description": "Filter by sector name (e.g. Mining, Renewables)"},
+                    "status": {"type": "string", "enum": ["Open", "Won", "Dead", "On Hold"], "description": "Filter by deal status"},
+                    "min_probability": {"type": "string", "enum": ["Low", "Medium", "High"], "description": "Filter by minimum closure probability"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_work_orders",
+            "description": "Fetch and filter work orders from the Work Orders board to answer questions about execution and billing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector": {"type": "string", "description": "Filter by sector name"},
+                    "status": {"type": "string", "description": "Filter by execution status (e.g. Completed, Ongoing)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cross_board_summary",
+            "description": "Attempt to join deals and work orders by deal name for a cross-board view.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector": {"type": "string", "description": "Optional sector filter"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_leadership_summary",
+            "description": "Produce a structured executive summary suitable for leadership updates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector": {"type": "string", "description": "Optional sector filter"},
+                    "quarter": {"type": "string", "description": "Optional quarter filter (e.g. Q1 2026)"}
+                }
+            }
+        }
+    }
+]
+
 
 # ---------------------------------------------------------------------------
-# Tool dispatcher
+# Tool Dispatcher (Shared)
 # ---------------------------------------------------------------------------
 
 def _execute_tool(tool_name: str, tool_input: dict) -> str:
@@ -92,69 +142,26 @@ def _execute_tool(tool_name: str, tool_input: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent handler
+# Providers Implementation
 # ---------------------------------------------------------------------------
 
-def handle_message(
-    user_message: str,
-    conversation_history: list[dict],
-) -> tuple[str, list[dict]]:
-    """
-    Process a user message through the Gemini agent with tool calling.
-
-    Args:
-        user_message: The user's question
-        conversation_history: List of prior messages [{"role": "user"|"assistant", "content": "..."}]
-
-    Returns:
-        (assistant_response_text, updated_conversation_history)
-    """
-    config = get_config()
-    api_key = config["GEMINI_API_KEY"]
-
-    if not api_key:
-        return "ERROR: Gemini API key is not configured. Please set GEMINI_API_KEY.", conversation_history
-
+def _handle_gemini(user_message: str, conversation_history: list[dict], api_key: str) -> tuple[str, list[dict]]:
+    """Query Gemini 3.5 Flash Lite with automatic retries."""
     client = genai.Client(api_key=api_key)
-
-    # Convert conversation history to Gemini format if needed, but for simplicity
-    # we'll just start a new chat session with history included in the prompt
-    # since we want to pass tools easily via the new SDK.
     
-    # We use a single prompt for this iteration to keep it simple, 
-    # appending the chat history.
+    # Build prompt with history
     history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in conversation_history])
     full_prompt = f"Previous conversation:\n{history_text}\n\nUSER: {user_message}" if history_text else user_message
 
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.7-flash',
-            contents=full_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                tools=TOOLS,
-                temperature=0.1,
-            ),
-        )
-    except Exception as e:
-        error_msg = f"Error communicating with Gemini: {str(e)}"
-        return error_msg, conversation_history
-
-    # Handle automatic tool calling by the SDK or manual processing if needed.
-    # The new google-genai SDK handles tool calls automatically if they are Python functions!
-    # Wait, the SDK doesn't automatically loop by default unless we use chat.
-    # Let's use the chat session.
-    
     chat = client.chats.create(
         model='gemini-3.5-flash-lite',
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
-            tools=TOOLS,
+            tools=GEMINI_TOOLS,
             temperature=0.1,
         )
     )
     
-    # Send the actual message with a retry loop for 503/429 errors
     max_retries = 4
     for attempt in range(max_retries):
         try:
@@ -167,13 +174,94 @@ def handle_message(
             
             return assistant_text, updated_history
         except APIError as e:
-            # Check for 503 Unavailable or 429 Rate Limit
             is_transient = "503" in str(e) or "429" in str(e) or "UNAVAILABLE" in str(e)
             if is_transient and attempt < max_retries - 1:
-                # Exponential backoff: 2s, 4s, 8s
-                sleep_time = 2 ** (attempt + 1)
-                time.sleep(sleep_time)
+                time.sleep(2 ** (attempt + 1))
                 continue
-            return f"I encountered an error: {str(e)}", conversation_history
+            return f"Error communicating with Gemini (503/429/UNAVAILABLE after {attempt+1} attempts). Consider adding a free `GROQ_API_KEY` to secrets for 100% uptime.", conversation_history
         except Exception as e:
             return f"I encountered an error: {str(e)}", conversation_history
+
+
+def _handle_groq(user_message: str, conversation_history: list[dict], api_key: str) -> tuple[str, list[dict]]:
+    """Query Groq (Llama 3.3 70B) using standard tool calling loop."""
+    import groq
+    client = groq.Groq(api_key=api_key)
+    
+    # Format messages for Groq API
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in conversation_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_message})
+    
+    max_iterations = 5
+    for _ in range(max_iterations):
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-specdec",
+                messages=messages,
+                tools=GROQ_TOOLS,
+                tool_choice="auto",
+                temperature=0.1,
+            )
+        except Exception as e:
+            return f"Error communicating with Groq: {str(e)}", conversation_history
+
+        response_message = response.choices[0].message
+        messages.append(response_message)
+
+        if response_message.tool_calls:
+            for tool_call in response_message.tool_calls:
+                function_name = tool_call.function.name
+                function_args = json.loads(tool_call.function.arguments)
+                
+                tool_output = _execute_tool(function_name, function_args)
+                
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": function_name,
+                    "content": tool_output,
+                })
+            # Continue the loop to get final response
+            continue
+        else:
+            # We got a final text answer
+            assistant_text = response_message.content
+            
+            updated_history = list(conversation_history)
+            updated_history.append({"role": "user", "content": user_message})
+            updated_history.append({"role": "assistant", "content": assistant_text})
+            
+            return assistant_text, updated_history
+
+    return "Groq exceeded maximum tool call iterations. Please try again.", conversation_history
+
+
+# ---------------------------------------------------------------------------
+# Main Handler (Routes based on credentials)
+# ---------------------------------------------------------------------------
+
+def handle_message(
+    user_message: str,
+    conversation_history: list[dict],
+) -> tuple[str, list[dict]]:
+    """
+    Process a user message through the routed provider.
+    Routes to Groq if GROQ_API_KEY is present, otherwise falls back to Gemini.
+    """
+    config = get_config()
+    
+    groq_key = config.get("GROQ_API_KEY")
+    gemini_key = config.get("GEMINI_API_KEY")
+
+    if groq_key:
+        return _handle_groq(user_message, conversation_history, groq_key)
+    elif gemini_key:
+        return _handle_gemini(user_message, conversation_history, gemini_key)
+    else:
+        return (
+            "ERROR: Neither GEMINI_API_KEY nor GROQ_API_KEY is configured. "
+            "Please configure at least one API key in `.streamlit/secrets.toml` or environment variables.",
+            conversation_history
+        )
