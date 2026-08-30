@@ -11,8 +11,10 @@ The agent always surfaces data quality caveats — never suppresses them.
 """
 
 import json
+import time
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 from config import get_config
 from tools import get_deals, get_work_orders, get_cross_board_summary, generate_leadership_summary
 
@@ -144,7 +146,7 @@ def handle_message(
     # Let's use the chat session.
     
     chat = client.chats.create(
-        model='gemini-3.7-flash',
+        model='gemini-3.5-flash-lite',
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             tools=TOOLS,
@@ -152,23 +154,26 @@ def handle_message(
         )
     )
     
-    # Replay history into the chat
-    for msg in conversation_history:
-        if msg["role"] == "user":
-            # We can't easily push raw history without making a real call, 
-            # so we'll just send the current message with context attached.
-            pass
+    # Send the actual message with a retry loop for 503/429 errors
+    max_retries = 4
+    for attempt in range(max_retries):
+        try:
+            chat_response = chat.send_message(full_prompt)
+            assistant_text = chat_response.text
             
-    # Send the actual message
-    try:
-        chat_response = chat.send_message(full_prompt)
-        assistant_text = chat_response.text
-        
-        updated_history = list(conversation_history)
-        updated_history.append({"role": "user", "content": user_message})
-        updated_history.append({"role": "assistant", "content": assistant_text})
-        
-        return assistant_text, updated_history
-        
-    except Exception as e:
-        return f"I encountered an error: {str(e)}", conversation_history
+            updated_history = list(conversation_history)
+            updated_history.append({"role": "user", "content": user_message})
+            updated_history.append({"role": "assistant", "content": assistant_text})
+            
+            return assistant_text, updated_history
+        except APIError as e:
+            # Check for 503 Unavailable or 429 Rate Limit
+            is_transient = "503" in str(e) or "429" in str(e) or "UNAVAILABLE" in str(e)
+            if is_transient and attempt < max_retries - 1:
+                # Exponential backoff: 2s, 4s, 8s
+                sleep_time = 2 ** (attempt + 1)
+                time.sleep(sleep_time)
+                continue
+            return f"I encountered an error: {str(e)}", conversation_history
+        except Exception as e:
+            return f"I encountered an error: {str(e)}", conversation_history
