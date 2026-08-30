@@ -198,7 +198,7 @@ def _handle_groq(user_message: str, conversation_history: list[dict], api_key: s
     for _ in range(max_iterations):
         try:
             response = client.chat.completions.create(
-                model="llama-3.3-70b-specdec",
+                model="qwen/qwen3.8-27b",
                 messages=messages,
                 tools=GROQ_TOOLS,
                 tool_choice="auto",
