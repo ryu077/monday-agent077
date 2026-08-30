@@ -30,6 +30,7 @@ SYSTEM_PROMPT = """You are a business intelligence analyst for a drone services 
 - **Use concrete numbers.** When discussing pipeline value, counts, or financials, always include the actual numbers.
 - **Format for readability.** Use bullet points, bold text, and tables where they help. Keep responses scannable.
 - **Acknowledge limitations.** If the cross-board join is unreliable or data is incomplete, say so upfront rather than presenting uncertain data as fact.
+- **NEVER fetch raw lists to aggregate or join them yourself.** Groq/Gemini free tier has strict rate and token limits. For cross-board queries, ALWAYS call `get_cross_board_summary`. For leadership updates or overall health questions, ALWAYS call `generate_leadership_summary`. Only use `get_deals` and `get_work_orders` with specific filters (like a specific sector or status) to look up details.
 
 ## Important Notes on the Data
 
@@ -130,6 +131,17 @@ def _execute_tool(tool_name: str, tool_input: dict) -> str:
 
     try:
         results, quality_notes = func(**tool_input)
+        
+        # Aggressively truncate raw lists to 15 items to prevent exceeding free tier token limits (TPM)
+        if isinstance(results, list) and len(results) > 15:
+            original_len = len(results)
+            results = results[:15]
+            quality_notes.append(
+                f"TRUNCATION WARNING: Results were truncated to the first 15 items (omitted {original_len - 15} items) "
+                f"to prevent token rate limits. Use specific sector/status filters, or call "
+                f"generate_leadership_summary / get_cross_board_summary for aggregated data."
+            )
+            
         return json.dumps({
             "results": results,
             "data_quality_notes": quality_notes,
