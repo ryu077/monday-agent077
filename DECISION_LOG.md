@@ -16,12 +16,19 @@
 
 | Decision | Alternative Considered | Why This Choice |
 |---|---|---|
+| **Groq (Qwen 3.8 27B)** as the primary LLM | Anthropic Claude, Google Gemini, OpenAI GPT-4 | Groq offers a generous free tier with extremely fast inference (~200 tokens/sec), built-in tool/function calling support, and zero-cost deployment. Claude and Gemini free tiers experienced persistent 503 "high demand" errors during development, making them unreliable for a live demo. The agent architecture is provider-agnostic — switching to Claude or Gemini requires only changing the API key and model name (both are already implemented as fallback providers in `agent.py`). |
+| **Multi-provider architecture** | Single LLM provider | The agent supports both Groq and Google Gemini dynamically based on which API key is configured. This makes the system resilient to provider outages and demonstrates production-grade thinking. If `GROQ_API_KEY` is set, it routes to Groq. Otherwise, it falls back to Gemini with exponential backoff retries. |
 | **Direct Monday.com GraphQL API** over MCP | MCP server for Monday.com | The GraphQL API is simpler, has no additional dependencies, and gives full control over queries and pagination. MCP would add unnecessary abstraction for a read-only use case. |
 | **No caching** | Redis/in-memory cache | Time-constrained build. Every query hits Monday.com live, ensuring data freshness. Cache would improve latency but adds complexity around invalidation. Noted as a future improvement. |
 | **Column matching by title (fuzzy)** | Column matching by ID | Monday.com assigns random IDs on CSV import. Title-based matching is more resilient to re-imports and board recreation. We use case-insensitive partial matching to handle title truncation. |
 | **Streamlit** over custom React/Next.js | Custom frontend with charts | Streamlit is the fastest path to a working chat UI. The assignment values data correctness over visual polish. A custom frontend would take 3-4x longer for marginal UX improvement. |
-| **Claude Sonnet 4** as the LLM | GPT-4, Gemini, open-source models | Claude's tool-calling is robust and well-documented. Sonnet 4 provides excellent reasoning at a reasonable cost. The structured tool-use loop is cleaner than function calling in other APIs. |
-| **Single tool call per query** (agent decides) | Hardcoded multi-tool pipelines | Letting Claude decide which tool(s) to call is more flexible and handles edge cases better than routing logic. The trade-off is occasional unnecessary API calls, but reliability is higher. |
+| **Tool result truncation** (15 items, essential fields only) | Sending full raw data to LLM | Free-tier LLM APIs have strict token-per-minute limits (e.g., Groq free tier: 8K TPM). Each normalized deal has 30+ fields; sending 340+ deals unfiltered would exceed any free tier. We slim each item to 8-9 essential fields and cap list results at 15 items, with aggregation tools (`generate_leadership_summary`, `get_cross_board_summary`) for broad questions. |
+
+## Known Limitations
+
+1. **Free-tier token limits:** Groq's free tier has an 8,000 tokens-per-minute limit. Broad queries that return large datasets (e.g., "show me all deals") are truncated to the first 15 items with a warning. Users should use specific filters (sector, status) or the leadership summary tool for aggregate views.
+
+2. **Cross-board join quality:** Customer codes use different naming schemes across boards (`COMPANY_XXX` vs `WOCOMPANY_XXX`) with zero overlap. Cross-board matching relies on Deal Name, which is unreliable since names like "Sakura" appear across multiple unrelated deals.
 
 ## What Would Be Improved With More Time
 
@@ -35,9 +42,7 @@
 
 5. **Multi-turn memory** — Current conversation history is maintained but not used strategically. Could implement context-aware follow-up (e.g., "drill into that" referring to the last sector mentioned).
 
-6. **Retry logic** — Currently uses basic try/except. A proper retry with exponential backoff would handle transient API failures more gracefully.
-
-7. **Comprehensive unit tests** — Test normalization functions against known edge cases (header rows, #VALUE! errors, blank fields).
+6. **Comprehensive unit tests** — Test normalization functions against known edge cases (header rows, #VALUE! errors, blank fields).
 
 ## How "Leadership Updates" Was Interpreted
 
