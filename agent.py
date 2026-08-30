@@ -126,7 +126,7 @@ def handle_message(
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.6-flash',
             contents=full_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
@@ -144,7 +144,7 @@ def handle_message(
     # Let's use the chat session.
     
     chat = client.chats.create(
-        model='gemini-2.5-flash',
+        model='gemini-3.6-flash',
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             tools=TOOLS,
