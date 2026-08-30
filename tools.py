@@ -55,7 +55,40 @@ def _fetch_and_normalize_work_orders() -> tuple[list[dict], list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Tool functions (called by Claude via tool use)
+# Slim-down helpers (reduce token count for LLM context)
+# ---------------------------------------------------------------------------
+
+def _slim_deal(d: dict) -> dict:
+    """Return only essential deal fields to minimize token usage."""
+    return {
+        "deal_name": d.get("deal_name", ""),
+        "client_code": d.get("client_code", ""),
+        "sector": d.get("sector", ""),
+        "deal_stage": d.get("deal_stage", ""),
+        "deal_status": d.get("deal_status", ""),
+        "deal_value_display": d.get("deal_value_display", "N/A"),
+        "closure_probability": d.get("closure_probability", "unrated"),
+        "owner_code": d.get("owner_code", ""),
+        "product_deal": d.get("product_deal", ""),
+    }
+
+
+def _slim_wo(w: dict) -> dict:
+    """Return only essential work order fields to minimize token usage."""
+    return {
+        "deal_name": w.get("deal_name", ""),
+        "serial_num": w.get("serial_num", ""),
+        "sector": w.get("sector", ""),
+        "execution_status": w.get("execution_status", ""),
+        "amount_display": w.get("amount_display", "N/A"),
+        "is_overdue": w.get("is_overdue", False),
+        "billing_status": w.get("billing_status", ""),
+        "wo_status": w.get("wo_status", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool functions (called by the LLM via tool use)
 # ---------------------------------------------------------------------------
 
 def get_deals(
@@ -120,7 +153,7 @@ def get_deals(
     )
     quality_notes.insert(0, summary_note)
 
-    return filtered, quality_notes
+    return [_slim_deal(d) for d in filtered], quality_notes
 
 
 def get_work_orders(
@@ -176,7 +209,7 @@ def get_work_orders(
     if overdue_count > 0:
         quality_notes.append(f"{overdue_count} work order(s) appear to be overdue (past probable end date but not completed)")
 
-    return filtered, quality_notes
+    return [_slim_wo(w) for w in filtered], quality_notes
 
 
 def get_cross_board_summary(
@@ -245,11 +278,20 @@ def get_cross_board_summary(
         w for w in work_orders if w["deal_name"].lower() not in {d["deal_name"].lower() for d in deals}
     ]
 
+    # Slim down matched items to essential fields only
+    slim_matched = []
+    for m in matched_deals[:10]:
+        slim_matched.append({
+            "deal": _slim_deal(m["deal"]),
+            "work_order_count": len(m["work_orders"]),
+            "work_orders": [_slim_wo(w) for w in m["work_orders"][:3]],  # Max 3 WOs per deal
+        })
+
     summary = {
         "matched_count": len(matched_deals),
         "unmatched_deals_count": len(unmatched_deals),
         "unmatched_work_orders_count": len(unmatched_wo),
-        "matched_items": matched_deals[:20],  # Limit to avoid token overflow
+        "matched_items": slim_matched,
         "sector_filter": sector,
         "total_deals": len(deals),
         "total_work_orders": len(work_orders),
